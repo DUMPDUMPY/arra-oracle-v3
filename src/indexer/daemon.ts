@@ -14,12 +14,12 @@
  */
 
 import { Elysia } from 'elysia';
-import { eq } from 'drizzle-orm';
 import { DB_PATH, REPO_ROOT } from '../config.ts';
-import { createDatabase, oracleFts } from '../db/index.ts';
+import { createDatabase } from '../db/index.ts';
+import { markJobDoneAndManifest, reclaimExpiredJobs } from './jobs.ts';
+import { loadCanonicalVectorDocument } from './vector-source.ts';
 import { createVectorStoreForModel, getEmbeddingModels } from '../vector/factory.ts';
 import { runWorker, type WorkerEvent } from './worker.ts';
-import { makeUpsertVector } from './upsert-vector.ts';
 import { daemonApiPlugin, makeEventBus } from '../routes/indexer-daemon/index.ts';
 import { startLearnWatcher, type StopWatch } from './learn-watcher.ts';
 
@@ -36,14 +36,9 @@ export async function startDaemon(): Promise<void> {
   let shuttingDown = false;
   let stopLearnWatcher: StopWatch | undefined;
 
-  // Resolve doc text via the FTS5 mirror table — same content oracle_learn writes.
-  const getDocText = (docId: string): string | null => {
-    const row = db.select({ content: oracleFts.content })
-      .from(oracleFts)
-      .where(eq(oracleFts.id, docId))
-      .get();
-    return row?.content ?? null;
-  };
+  const reclaimed = reclaimExpiredJobs(sqlite);
+  if (reclaimed > 0) console.log(`[arra-indexer] reclaimed ${reclaimed} expired job lease(s)`);
+  const getDocument = (docId: string) => loadCanonicalVectorDocument(sqlite, docId);
 
   // Embed via the existing factory — produces a model-aware OllamaEmbeddings.
   // Lazy per model so we don't spin up unused embedders.
@@ -71,18 +66,24 @@ export async function startDaemon(): Promise<void> {
     return vector;
   };
 
-  // Stores the document's real text alongside its precomputed vector, and deletes before
-  // adding so a re-index replaces the row instead of appending. Extracted to its own module
-  // because it is untestable from here — that is why #2806 survived on both branches.
-  const upsertVector = makeUpsertVector({ models, getStore });
+  const upsertVector = async (collection: string, document: import('../vector/types.ts').VectorDocument, vector: number[]): Promise<void> => {
+    const entry = Object.entries(models).find(([, m]) => m.collection === collection);
+    if (!entry) throw new Error(`No registered model has collection: ${collection}`);
+    const store = await getStore(entry[0]);
+    await store.addDocuments([{ ...document, vector }]);
+  };
 
   const workerPromises: Promise<unknown>[] = [];
   for (const modelKey of Object.keys(models)) {
     const p = runWorker(modelKey, {
       db: sqlite,
-      getDocText,
+      getDocument,
       embed,
       upsertVector,
+      commitSuccess: (job, document) => markJobDoneAndManifest(sqlite, {
+        ...job,
+        sourceFile: String(document.metadata.source_file ?? ''),
+      }),
       isShuttingDown: () => shuttingDown,
       onEvent: eventBus.publish,
       pollIntervalMs: 1000,

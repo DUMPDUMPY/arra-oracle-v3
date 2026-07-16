@@ -29,9 +29,7 @@ import { getEmbeddingModels } from '../vector/factory.ts';
 import { collectDocuments, collectPsiLearn, collectSecurityCorpus } from './collectors.ts';
 import { collectPsiInbox } from './collect-inbox.ts';
 import {
-  changedDocumentIds,
   enqueueVectorReindexJobs,
-  snapshotActiveIndexerDocs,
   supersedeReplacedSourceDocs,
 } from './reindex-state.ts';
 import { oracleFts, storeDocuments } from './storage.ts';
@@ -89,8 +87,6 @@ export class OracleIndexer {
         `Set ORACLE_REPO_ROOT or run from a directory containing ψ/memory/ to avoid data loss.`
       );
     }
-
-    const beforeDocs = snapshotActiveIndexerDocs(this.db, tenantId);
 
     // Collect documents from all source types
     const shared = { config: this.config, seenContentHashes: this.seenContentHashes };
@@ -161,13 +157,12 @@ export class OracleIndexer {
       }
     }
 
-    const changedIds = changedDocumentIds(beforeDocs, indexDocuments);
-
-    // Store in SQLite + FTS5 first. Vector work is queued afterwards so
-    // embedding failures cannot roll back the source-of-truth text index.
+    // Store in SQLite + FTS5 first. Queue eligibility derives from this
+    // canonical persisted payload, not parser snapshots, so unchanged scans
+    // cannot manufacture false "changed" jobs.
     await storeDocuments(this.sqlite, this.db, null, this.project, indexDocuments, { tenantId });
     const superseded = supersedeReplacedSourceDocs(this.db, indexDocuments, tenantId);
-    const vectorJobs = safeEnqueueVectorJobs(this.db, indexDocuments, changedIds);
+    const vectorJobs = safeEnqueueVectorJobs(this.db, indexDocuments);
 
     setIndexingStatus(this.db, this.config, false, indexDocuments.length, indexDocuments.length);
     console.log(`Indexed ${indexDocuments.length} chunks (SQLite + FTS5)`);
@@ -187,9 +182,9 @@ function tenantScopedWhere(base: SQL, tenantId: string | undefined): SQL {
   return tenantId ? and(base, eq(oracleDocuments.tenantId, tenantId))! : base;
 }
 
-function safeEnqueueVectorJobs(db: BunSQLiteDatabase<typeof schema>, documents: OracleDocument[], changedIds: Set<string>) {
+function safeEnqueueVectorJobs(db: BunSQLiteDatabase<typeof schema>, documents: OracleDocument[]) {
   try {
-    return enqueueVectorReindexJobs(db, documents, getEmbeddingModels(), changedIds);
+    return enqueueVectorReindexJobs(db, documents, getEmbeddingModels());
   } catch {
     return { queued: 0, skipped: 0, failed: documents.length };
   }
