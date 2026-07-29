@@ -37,7 +37,7 @@ const VECTOR_ROW_BY_ID_SQL = `
     d.source_file, d.concepts, d.project, d.created_at
   FROM oracle_documents d
   JOIN oracle_fts f ON d.id = f.id
-  WHERE d.id = ?
+  WHERE d.id = ? AND (d.superseded_by IS NULL OR d.superseded_by = '')
   GROUP BY d.id
 `;
 
