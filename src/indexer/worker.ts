@@ -22,7 +22,13 @@ export type WorkerEvent =
 export interface WorkerStats { modelKey: string; processed: number; errors: number; emptyPolls: number }
 const DEFAULT_POLL_MS = 1000;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-function emit(deps: WorkerDeps, ev: WorkerEvent): void { try { deps.onEvent?.(ev); } catch {} }
+function emit(deps: { onEvent?: (ev: WorkerEvent) => void }, ev: WorkerEvent): void {
+  try {
+    deps.onEvent?.(ev);
+  } catch (error) {
+    console.warn(`[arra-indexer] event hook failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 
 export async function runWorker(modelKey: string, deps: WorkerDeps): Promise<WorkerStats> {
   const stats: WorkerStats = { modelKey, processed: 0, errors: 0, emptyPolls: 0 };
@@ -76,19 +82,19 @@ export async function runBatchWorker(modelKey: string, deps: BatchWorkerDeps): P
       await sleep(deps.pollIntervalMs ?? DEFAULT_POLL_MS);
       continue;
     }
-    if (jobs.length === 0) { stats.emptyPolls++; emit(deps as unknown as WorkerDeps, { type: 'idle', modelKey }); await sleep(deps.pollIntervalMs ?? DEFAULT_POLL_MS); continue; }
-    jobs.forEach((job) => emit(deps as unknown as WorkerDeps, { type: 'claimed', job }));
+    if (jobs.length === 0) { stats.emptyPolls++; emit(deps, { type: 'idle', modelKey }); await sleep(deps.pollIntervalMs ?? DEFAULT_POLL_MS); continue; }
+    jobs.forEach((job) => emit(deps, { type: 'claimed', job }));
     const deletes = jobs.filter((job) => job.operation === 'delete');
     if (deletes.length > 0) {
-      try { await deps.deleteVectors(deletes[0].collection, deletes.map((job) => job.docId)); deps.commitSuccess(deletes.map((job) => ({ ...job, sourceFile: '' }))); stats.processed += deletes.length; deletes.forEach((job) => emit(deps as unknown as WorkerDeps, { type: 'done', job, durationMs: 0 })); }
-      catch (error) { const message = error instanceof Error ? error.message : String(error); deletes.forEach((job) => { markJobError(deps.db, job.id, message); emit(deps as unknown as WorkerDeps, { type: 'error', job, error: message }); }); stats.errors += deletes.length; }
+      try { await deps.deleteVectors(deletes[0].collection, deletes.map((job) => job.docId)); deps.commitSuccess(deletes.map((job) => ({ ...job, sourceFile: '' }))); stats.processed += deletes.length; deletes.forEach((job) => emit(deps, { type: 'done', job, durationMs: 0 })); }
+      catch (error) { const message = error instanceof Error ? error.message : String(error); deletes.forEach((job) => { markJobError(deps.db, job.id, message); emit(deps, { type: 'error', job, error: message }); }); stats.errors += deletes.length; }
     }
     const candidates: Array<{ job: EnqueuedJob; document: VectorDocument }> = [];
     const { vectorContentHash } = await import('./vector-index-manifest.ts');
     for (const job of jobs.filter((job) => job.operation === 'upsert')) {
       const document = deps.getDocument(job.docId);
-      if (!document) { markJobDone(deps.db, job.id); stats.processed++; emit(deps as unknown as WorkerDeps, { type: 'doc_missing', job }); continue; }
-      if (!job.contentHash.startsWith('manual:') && vectorContentHash(document) !== job.contentHash) { markJobDone(deps.db, job.id); stats.processed++; emit(deps as unknown as WorkerDeps, { type: 'stale_payload', job }); continue; }
+      if (!document) { markJobDone(deps.db, job.id); stats.processed++; emit(deps, { type: 'doc_missing', job }); continue; }
+      if (!job.contentHash.startsWith('manual:') && vectorContentHash(document) !== job.contentHash) { markJobDone(deps.db, job.id); stats.processed++; emit(deps, { type: 'stale_payload', job }); continue; }
       candidates.push({ job, document });
     }
     if (candidates.length === 0) continue;
@@ -99,10 +105,10 @@ export async function runBatchWorker(modelKey: string, deps: BatchWorkerDeps): P
       await deps.upsertVectors(candidates[0].job.collection, docs);
       const completed = candidates.map(({ job, document }) => ({ ...job, sourceFile: String(document.metadata.source_file ?? '') }));
       deps.commitSuccess(completed); stats.processed += completed.length;
-      completed.forEach((job) => emit(deps as unknown as WorkerDeps, { type: 'done', job, durationMs: 0 }));
+      completed.forEach((job) => emit(deps, { type: 'done', job, durationMs: 0 }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      candidates.forEach(({ job }) => { markJobError(deps.db, job.id, message); emit(deps as unknown as WorkerDeps, { type: 'error', job, error: message }); }); stats.errors += candidates.length;
+      candidates.forEach(({ job }) => { markJobError(deps.db, job.id, message); emit(deps, { type: 'error', job, error: message }); }); stats.errors += candidates.length;
     }
   }
   return stats;
