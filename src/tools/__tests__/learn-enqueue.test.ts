@@ -48,12 +48,16 @@ CREATE TABLE indexing_jobs (
   doc_id TEXT NOT NULL,
   model_key TEXT NOT NULL,
   collection TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  operation TEXT NOT NULL DEFAULT 'upsert',
   status TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')*1000),
   claimed_at INTEGER,
+  lease_expires_at INTEGER,
   finished_at INTEGER,
-  error TEXT
+  error TEXT,
+  UNIQUE(model_key, doc_id, content_hash, operation)
 );
 `;
 
