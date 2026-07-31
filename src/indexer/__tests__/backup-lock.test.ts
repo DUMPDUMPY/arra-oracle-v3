@@ -9,7 +9,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { acquireLock, releaseLock } from '../backup.ts';
+import { Database } from 'bun:sqlite';
+import { acquireLock, backupDatabase, releaseLock } from '../backup.ts';
 
 describe('backup file lock', () => {
   let tmpDir: string;
@@ -79,5 +80,62 @@ describe('backup file lock', () => {
   it('releaseLock is safe when lock already removed', () => {
     // Should not throw
     expect(() => releaseLock(lockPath)).not.toThrow();
+  });
+});
+
+describe('backup rotation', () => {
+  let tmpDir: string;
+  let dbPath: string;
+  let oldKeep: string | undefined;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'oracle-backup-rotation-'));
+    dbPath = path.join(tmpDir, 'oracle.db');
+    oldKeep = process.env.ORACLE_BACKUP_KEEP;
+    process.env.ORACLE_BACKUP_KEEP = '2';
+
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE oracle_documents (
+        id TEXT PRIMARY KEY,
+        type TEXT,
+        source_file TEXT,
+        concepts TEXT,
+        project TEXT
+      );
+      CREATE TABLE oracle_fts (id TEXT PRIMARY KEY, content TEXT);
+      INSERT INTO oracle_documents VALUES ('d1', 'learning', 'a.md', '[]', 'p');
+      INSERT INTO oracle_fts VALUES ('d1', 'content');
+    `);
+    db.close();
+  });
+
+  afterEach(() => {
+    if (oldKeep === undefined) delete process.env.ORACLE_BACKUP_KEEP;
+    else process.env.ORACLE_BACKUP_KEEP = oldKeep;
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch { /* best effort */ }
+  });
+
+  it('ignores non-timestamp backup artifacts when rotating timestamped backups', () => {
+    for (const name of [
+      'oracle.db.backup-pre-alpha1608-20260707-shm',
+      'oracle.db.backup-pre-alpha1608-20260707-wal',
+      'oracle.db.backup-2026-07-30T00-00-00-000Z',
+      'oracle.db.backup-2026-07-30T01-00-00-000Z',
+      'oracle.db.backup-2026-07-30T02-00-00-000Z',
+    ]) fs.writeFileSync(path.join(tmpDir, name), 'x');
+
+    const db = new Database(dbPath);
+    backupDatabase(db, { dbPath } as any);
+    db.close();
+
+    const files = fs.readdirSync(tmpDir).filter(f => f.startsWith('oracle.db.backup-'));
+    expect(files).toContain('oracle.db.backup-pre-alpha1608-20260707-shm');
+    expect(files).toContain('oracle.db.backup-pre-alpha1608-20260707-wal');
+
+    const timestamped = files.filter(f => /^oracle\.db\.backup-\d{4}-/.test(f));
+    expect(timestamped).toHaveLength(2);
   });
 });

@@ -10,6 +10,7 @@ import type { IndexerConfig } from '../types.ts';
 import { currentTenantId } from '../middleware/tenant.ts';
 
 const DEFAULT_BACKUP_KEEP = 10;
+const BACKUP_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
 
 /**
  * Stale lock threshold: if a lock file is older than this, assume the
@@ -91,7 +92,11 @@ function rotateBackups(dbPath: string, keep: number): void {
     }
 
     const matches = freshEntries
-      .filter(f => f.startsWith(prefix) && f.endsWith(suffix))
+      .filter(f => {
+        if (!f.startsWith(prefix) || !f.endsWith(suffix)) return false;
+        const suffixStart = suffix ? f.length - suffix.length : f.length;
+        return BACKUP_TIMESTAMP_RE.test(f.slice(prefix.length, suffixStart));
+      })
       .sort()
       .reverse();
     for (const old of matches.slice(keep)) {
