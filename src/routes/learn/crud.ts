@@ -124,10 +124,34 @@ export function createLearning(body: LearnCreateBody) {
   if (requestedSourceFile === null) return { status: 400, body: { error: INVALID_LEARNING_SOURCE_FILE } };
   const now = Date.now();
   const concepts = conceptsFrom(body.concepts);
-  const identity = nextIdentity(pattern, body.id, requestedSourceFile);
-  if (rowById(identity.id)) return { status: 409, body: { error: 'Learning already exists' } };
+  let identity = nextIdentity(pattern, body.id, requestedSourceFile);
+
+  // LOCAL PATCH (DUMPDUMPY 2026-08-16): when a project + vault are set, write
+  // project-nested under the vault root — same contract as MCP oracle_learn
+  // (src/tools/learn.ts). Upstream keeps the flat write; tracked in #2849
+  // item 5. Remove when upstream aligns this CRUD path.
   const content = learningContent(pattern, concepts, body.source);
-  if (!writeLearningFile(identity.sourceFile, content)) {
+  let nestedWritten = false;
+  if (body.project && !requestedSourceFile) {
+    try {
+      const { getVaultPsiRoot } = require('../../vault/handler.ts') as typeof import('../../vault/handler.ts');
+      const vault = getVaultPsiRoot();
+      if ('path' in vault) {
+        const projectDir = body.project.toLowerCase();
+        const nestedRel = `${projectDir}/ψ/memory/learnings/${path.basename(identity.sourceFile)}`;
+        const nestedAbs = path.join(vault.path, nestedRel);
+        fs.mkdirSync(path.dirname(nestedAbs), { recursive: true });
+        if (fs.existsSync(nestedAbs)) {
+          return { status: 409, body: { error: 'Learning sourceFile already exists' } };
+        }
+        fs.writeFileSync(nestedAbs, content, 'utf-8');
+        identity = { ...identity, sourceFile: nestedRel };
+        nestedWritten = true;
+      }
+    } catch { /* fall back to upstream flat write */ }
+  }
+  if (rowById(identity.id)) return { status: 409, body: { error: 'Learning already exists' } };
+  if (!nestedWritten && !writeLearningFile(identity.sourceFile, content)) {
     return { status: 409, body: { error: 'Learning sourceFile already exists' } };
   }
   const tenantId = tenantIdForWrite();
