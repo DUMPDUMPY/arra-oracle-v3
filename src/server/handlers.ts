@@ -713,25 +713,7 @@ export function persistLearningDoc(opts: {
   const { pattern, subdir, filename, id } = opts;
   const now = new Date();
 
-  // LOCAL PATCH (DUMPDUMPY 2026-08-16, align with MCP src/tools/learn.ts):
-  // when the vault is configured, write project-nested under the vault root —
-  // same contract as oracle_learn MCP. Upstream handleLearn still writes flat
-  // to currentRepoRoot(); tracked in #2849 item 5 (comment 2026-08-16).
-  // Remove this block when upstream aligns handleLearn/persistLearningDoc.
-  let writeRoot = currentRepoRoot();
-  let sourceFile = `${subdir}/${filename}`;
-  if (opts.project) {
-    try {
-      const { getVaultPsiRoot } = require('../vault/handler.ts') as typeof import('../vault/handler.ts');
-      const vault = getVaultPsiRoot();
-      if ('path' in vault) {
-        const projectDir = opts.project.toLowerCase();
-        writeRoot = path.join(vault.path, projectDir);
-        sourceFile = `${projectDir}/${subdir}/${filename}`;
-      }
-    } catch { /* fall back to flat write */ }
-  }
-  const dir = path.join(writeRoot, subdir);
+  const dir = path.join(currentRepoRoot(), subdir);
   fs.mkdirSync(dir, { recursive: true });
   const filePath = path.join(dir, filename);
 
@@ -753,6 +735,8 @@ export function persistLearningDoc(opts: {
   });
 
   fs.writeFileSync(filePath, frontmatter, 'utf-8');
+
+  const sourceFile = `${subdir}/${filename}`;
 
   db.insert(oracleDocuments).values({
     id,
