@@ -27,6 +27,9 @@ const relProjectFirstOrphan = `github.com/acme/demo/ψ/memory/learnings/verify-p
 const relCrew = `ψ/crew/reviewer/memory/learnings/verify-crew-${stamp}.md`;
 const relProjectInbox = `github.com/acme/demo/ψ/inbox/handoff/verify-project-inbox-${stamp}.md`;
 const relCrewInbox = `ψ/crew/reviewer/inbox/handoff/verify-crew-inbox-${stamp}.md`;
+const relRootInbox = `ψ/inbox/handoff/verify-root-inbox-${stamp}.md`;
+const relLegacyFlat = `ψ/memory/learnings/verify-legacy-${stamp}.md`;
+const relLegacyProjectFirst = `github.com/acme/demo/ψ/memory/learnings/verify-legacy-${stamp}.md`;
 const ids = {
   absolute: `verify-absolute-${stamp}`,
   backslash: `verify-backslash-${stamp}`,
@@ -44,7 +47,7 @@ function writeRepoFile(relPath: string) {
   writeFileSync(fullPath, `# ${relPath}\n`);
 }
 
-function seedDoc(id: string, sourceFile: string) {
+function seedDoc(id: string, sourceFile: string, options: { project?: string; superseded?: boolean } = {}) {
   db.insert(oracleDocuments).values({
     id,
     type: 'learning',
@@ -53,6 +56,9 @@ function seedDoc(id: string, sourceFile: string) {
     createdAt: now,
     updatedAt: now,
     indexedAt: now + 60_000,
+    project: options.project,
+    supersededBy: options.superseded ? '_test_superseded' : null,
+    supersededAt: options.superseded ? now : null,
   }).run();
 }
 
@@ -62,6 +68,8 @@ writeRepoFile(relProjectFirst);
 writeRepoFile(relCrew);
 writeRepoFile(relProjectInbox);
 writeRepoFile(relCrewInbox);
+writeRepoFile(relRootInbox);
+writeRepoFile(relLegacyProjectFirst);
 seedDoc(ids.absolute, path.join(repoRoot, relAbsolute));
 seedDoc(ids.backslash, relBackslash.replaceAll('/', '\\'));
 seedDoc(ids.blank, '   ');
@@ -70,6 +78,9 @@ seedDoc(ids.orphanB, relOrphan);
 seedDoc(ids.projectFirst, relProjectFirst);
 seedDoc(ids.projectFirstOrphan, relProjectFirstOrphan);
 seedDoc(ids.crew, relCrew);
+seedDoc('verify-root-inbox', relRootInbox);
+seedDoc('verify-legacy-flat', relLegacyFlat, { project: 'github.com/acme/demo' });
+seedDoc('verify-superseded', `ψ/memory/learnings/verify-superseded-${stamp}.md`, { superseded: true });
 
 function restore(name: string, value: string | undefined) {
   if (value === undefined) delete process.env[name];
@@ -88,7 +99,7 @@ describe('verifyKnowledgeBase edge cases', () => {
   test('normalizes absolute and backslash DB source paths before classification', () => {
     const result = verifyKnowledgeBase({ repoRoot, type: ' learning ' });
 
-    expect(result.counts.healthy).toBe(4);
+    expect(result.counts.healthy).toBe(6);
     expect(result.missing).toEqual([]);
     expect(result.orphaned).toEqual([relOrphan, relProjectFirstOrphan]);
     expect(result.orphaned).not.toContain('');
@@ -127,5 +138,14 @@ describe('verifyKnowledgeBase edge cases', () => {
 
     expect(result.untracked).toContain(relProjectInbox);
     expect(result.untracked).toContain(relCrewInbox);
+    expect(result.untracked).not.toContain(relRootInbox);
+  });
+
+  test('ignores superseded rows and resolves legacy flat paths to project-first files', () => {
+    const result = verifyKnowledgeBase({ repoRoot, type: 'learning' });
+
+    expect(result.orphaned).not.toContain(`ψ/memory/learnings/verify-superseded-${stamp}.md`);
+    expect(result.orphaned).not.toContain(relLegacyFlat);
+    expect(result.untracked).not.toContain(relRootInbox);
   });
 });

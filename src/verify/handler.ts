@@ -8,7 +8,8 @@
  */
 
 import path from 'path';
-import { and, eq } from 'drizzle-orm';
+import { existsSync } from 'node:fs';
+import { and, eq, isNull } from 'drizzle-orm';
 import { db, oracleDocuments } from '../db/index.ts';
 import { currentTenantId } from '../middleware/tenant.ts';
 import { discoverCrewPsiDirs, discoverProjectPsiDirs } from '../indexer/discovery.ts';
@@ -40,6 +41,24 @@ export interface VerifyMismatch {
   mtimeMs?: number;
 }
 
+const PROJECT_PATH_RE = /^(?:github\.com|gitlab\.com|bitbucket\.org)\/[^/]+\/[^/]+$/;
+
+function canonicalSourceFile(sourceFile: string, project: string | null, repoRoot: string): string | null {
+  const normalized = normalizeSourceFile(sourceFile, repoRoot);
+  if (!normalized || !project || !PROJECT_PATH_RE.test(project) || !normalized.startsWith('ψ/')) {
+    return normalized;
+  }
+
+  // Older learn writers persisted flat ψ/ paths. Prefer their project-first
+  // successor when that canonical file exists on disk.
+  const projectFirst = `${project}/${normalized}`;
+  const repoBase = path.resolve(repoRoot);
+  const candidate = path.resolve(repoBase, projectFirst);
+  return candidate.startsWith(`${repoBase}${path.sep}`) && existsSync(candidate)
+    ? projectFirst
+    : normalized;
+}
+
 export function verifyKnowledgeBase(opts: {
   check?: boolean;
   type?: string;
@@ -57,7 +76,9 @@ export function verifyKnowledgeBase(opts: {
     }
   };
 
-  const psiDirs = [...discoverProjectPsiDirs(repoRoot), ...discoverCrewPsiDirs(repoRoot)];
+  const projectPsiDirs = discoverProjectPsiDirs(repoRoot);
+  const crewPsiDirs = discoverCrewPsiDirs(repoRoot);
+  const psiDirs = [...projectPsiDirs, ...crewPsiDirs];
   for (const psiDir of psiDirs) {
     for (const sub of memorySubdirs) {
       walkInto(path.join(psiDir, 'memory', sub));
@@ -70,6 +91,12 @@ export function verifyKnowledgeBase(opts: {
   }
   walkInto(path.join(repoRoot, 'ψ', 'learn'));
 
+  // ψ/inbox is an indexed source, not merely an untracked side tree.
+  walkInto(path.join(repoRoot, 'ψ', 'inbox'));
+  for (const psiDir of projectPsiDirs) {
+    walkInto(path.join(psiDir, 'inbox'));
+  }
+
   // 2. Query DB for all indexed documents
   const normalizedType = type?.trim();
   const typeFilter = normalizedType && normalizedType !== 'all' ? normalizedType : undefined;
@@ -78,33 +105,39 @@ export function verifyKnowledgeBase(opts: {
     sourceFile: oracleDocuments.sourceFile,
     indexedAt: oracleDocuments.indexedAt,
     type: oracleDocuments.type,
+    project: oracleDocuments.project,
   };
+  const activeDocWhere = and(
+    isNull(oracleDocuments.supersededBy),
+    isNull(oracleDocuments.supersededAt),
+  )!;
   const dbRows = typeFilter && tenantId
     ? db.select(fields)
         .from(oracleDocuments)
-        .where(and(eq(oracleDocuments.type, typeFilter), eq(oracleDocuments.tenantId, tenantId)))
+        .where(and(eq(oracleDocuments.type, typeFilter), eq(oracleDocuments.tenantId, tenantId), activeDocWhere))
         .all()
     : typeFilter
     ? db.select({
         ...fields,
       })
         .from(oracleDocuments)
-        .where(eq(oracleDocuments.type, typeFilter))
+        .where(and(eq(oracleDocuments.type, typeFilter), activeDocWhere))
         .all()
     : tenantId
       ? db.select(fields)
         .from(oracleDocuments)
-        .where(eq(oracleDocuments.tenantId, tenantId))
+        .where(and(eq(oracleDocuments.tenantId, tenantId), activeDocWhere))
         .all()
-      : db.select(fields)
+    : db.select(fields)
         .from(oracleDocuments)
+        .where(activeDocWhere)
         .all();
 
   // Build map: sourceFile -> { indexedAt, ids[] }
   // Multiple DB entries can point to the same source file (chunked docs)
   const dbFileMap = new Map<string, { indexedAt: number; ids: string[] }>();
   for (const row of dbRows) {
-    const sourceFile = normalizeSourceFile(row.sourceFile, repoRoot);
+    const sourceFile = canonicalSourceFile(row.sourceFile, row.project, repoRoot);
     if (!sourceFile) continue;
     const existing = dbFileMap.get(sourceFile);
     if (existing) {
@@ -118,6 +151,19 @@ export function verifyKnowledgeBase(opts: {
     }
   }
 
+  const untrackedRoots = [path.join(repoRoot, 'ψ', 'inbox')];
+  for (const psiDir of psiDirs) {
+    untrackedRoots.push(path.join(psiDir, 'inbox'));
+  }
+  const untrackedPathSet = new Set<string>();
+  if (!tenantId) {
+    for (const fullDir of untrackedRoots) {
+      for (const file of walkMarkdownFiles(fullDir, repoRoot)) {
+        untrackedPathSet.add(file.relativePath);
+      }
+    }
+  }
+
   // 3. Classify
   const healthy: string[] = [];
   const missing: string[] = [];
@@ -126,7 +172,9 @@ export function verifyKnowledgeBase(opts: {
 
   // Tenant-scoped requests can only prove ownership for DB-backed files.
   // Keep global disk-only "missing"/"untracked" reporting for unscoped runs.
-  const pathsToCheck = tenantId ? dbFileMap.keys() : diskFiles.keys();
+  const pathsToCheck = tenantId
+    ? dbFileMap.keys()
+    : [...diskFiles.keys()].filter((relPath) => !untrackedPathSet.has(relPath) || dbFileMap.has(relPath));
   for (const relPath of pathsToCheck) {
     const mtimeMs = diskFiles.get(relPath);
     const dbEntry = dbFileMap.get(relPath);
@@ -156,23 +204,10 @@ export function verifyKnowledgeBase(opts: {
     }
   }
 
-  // 4. Count untracked files outside indexed dirs.
-  // Mirror the psiDirs scope above: inbox lives at repoRoot, project-first ({project}/ψ/inbox),
-  // and crew ({member}/inbox). A root-only walk silently misses the project/crew layouts and
-  // lets those files fall through both phases — orphaned by the memory-only walk, invisible here.
-  const untrackedRoots = [path.join(repoRoot, 'ψ', 'inbox')];
-  for (const psiDir of psiDirs) {
-    untrackedRoots.push(path.join(psiDir, 'inbox'));
-  }
-  const untracked: string[] = [];
-  if (!tenantId) {
-    for (const fullDir of untrackedRoots) {
-      const files = walkMarkdownFiles(fullDir, repoRoot);
-      for (const f of files) {
-        untracked.push(f.relativePath);
-      }
-    }
-  }
+  // 4. Count inbox files that are still outside the DB index.
+  const untracked = tenantId
+    ? []
+    : [...untrackedPathSet].filter((sourceFile) => !dbFileMap.has(sourceFile)).sort();
 
   // 5. Auto-fix orphans if check=false
   let fixedOrphans = 0;
