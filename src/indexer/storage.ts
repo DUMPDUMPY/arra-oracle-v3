@@ -12,7 +12,7 @@ import { enrichTextWithAcronyms } from '../search/acronyms.ts';
 import { tenantIdForWrite } from '../middleware/tenant.ts';
 import { replaceEntityLinks } from '../search/entity-ranking.ts';
 import { chunkDocumentsForIndexing } from './chunker.ts';
-import { replaceDocumentPointers } from '../search/pointer-index.ts';
+import { replaceDocumentPointersBatch } from '../search/pointer-index.ts';
 import type { VectorStoreAdapter } from '../vector/types.ts';
 import type { OracleDocument } from '../types.ts';
 
@@ -37,6 +37,7 @@ export async function storeDocuments(
   const now = Date.now();
   const tenantId = opts.tenantId ?? tenantIdForWrite();
   const storedDocuments = chunkDocumentsForIndexing(documents);
+  const pointerInputs: Parameters<typeof replaceDocumentPointersBatch>[1] = [];
 
   // Prepare for vector store
   const ids: string[] = [];
@@ -96,7 +97,11 @@ export async function storeDocuments(
         concepts: doc.concepts,
         now,
       });
-      replaceDocumentPointers(sqlite, {
+      // LOCAL PATCH 2026-08-19 (deploy/alpha, not upstream): per-doc pointer
+      // replacement was the dominant reindex cost (full pointer-table scan per
+      // document — measured 107ms/doc at 2.9k docs). Collect pointer inputs and
+      // apply them in ONE batched pass after the transaction instead.
+      pointerInputs.push({
         documentId: doc.id,
         tenantId,
         content: indexedContent,
@@ -118,6 +123,10 @@ export async function storeDocuments(
       });
     }
   });
+
+  // Apply pointer updates in one batched pass (LOCAL PATCH 2026-08-19) —
+  // see the comment inside the transaction loop above.
+  replaceDocumentPointersBatch(sqlite, pointerInputs);
 
   // Batch insert to vector store in chunks of 100 (skip if no client)
   if (!vectorClient) {

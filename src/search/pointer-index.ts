@@ -1,4 +1,4 @@
-import { and, eq, or, type SQL } from 'drizzle-orm';
+import { and, eq, or, sql, type SQL } from 'drizzle-orm';
 import type { Database } from 'bun:sqlite';
 import { drizzle, type BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import * as schema from '../db/schema.ts';
@@ -72,19 +72,113 @@ export function replaceDocumentPointers(dbInput: OracleDbInput, input: PointerIn
   }
 }
 
+/**
+ * LOCAL ADDITION 2026-08-19 (deploy/alpha, not upstream): batched equivalent of
+ * replaceDocumentPointers for bulk reindex. Applies remove+add for ALL documents
+ * with a single table load and one JSON parse per pointer row, instead of one
+ * full-table scan per document. End state is identical to calling
+ * replaceDocumentPointers per input (each pointer's docIds ends up containing
+ * exactly the documents that map to it).
+ */
+export function replaceDocumentPointersBatch(dbInput: OracleDbInput, inputs: PointerInput[]): void {
+  if (inputs.length === 0) return;
+  try {
+    const db = toDb(dbInput);
+    const byTenant = new Map<string, PointerInput[]>();
+    for (const input of inputs) {
+      const tenant = input.tenantId?.trim() || 'default';
+      const group = byTenant.get(tenant);
+      if (group) group.push(input);
+      else byTenant.set(tenant, [input]);
+    }
+
+    for (const [tenantId, group] of byTenant) {
+      const rows = db.select({
+        id: schema.oraclePointerIndex.id,
+        kind: schema.oraclePointerIndex.kind,
+        key: schema.oraclePointerIndex.key,
+        docIds: schema.oraclePointerIndex.docIds,
+      }).from(schema.oraclePointerIndex)
+        .where(eq(schema.oraclePointerIndex.tenantId, tenantId))
+        .all() as PointerRow[];
+
+      const remove = new Set(group.map((input) => input.documentId));
+      const state = new Map<string, { kind: PointerKind; key: string; ids: string[]; original: string }>();
+      for (const row of rows) {
+        const ids = parseIds(row.docIds).filter((id) => !remove.has(id));
+        state.set(row.id, { kind: row.kind, key: row.key, ids, original: row.docIds });
+      }
+
+      const now = Date.now();
+      const inserted = new Map<string, { kind: PointerKind; key: string; ids: string[] }>();
+      for (const input of group) {
+        for (const item of documentPointers(input)) {
+          const id = pointerId(tenantId, item.kind, item.key);
+          const existing = state.get(id) ?? inserted.get(id);
+          if (existing) {
+            if (!existing.ids.includes(input.documentId)) {
+              existing.ids = [...existing.ids, input.documentId].sort();
+            }
+          } else {
+            const fresh = { kind: item.kind, key: item.key, ids: [input.documentId] };
+            inserted.set(id, fresh);
+          }
+        }
+      }
+
+      for (const [id, entry] of state) {
+        const next = JSON.stringify(entry.ids);
+        if (next === entry.original) continue;
+        if (entry.ids.length === 0) {
+          db.delete(schema.oraclePointerIndex).where(eq(schema.oraclePointerIndex.id, id)).run();
+        } else {
+          db.update(schema.oraclePointerIndex)
+            .set({ docIds: next, updatedAt: now })
+            .where(eq(schema.oraclePointerIndex.id, id))
+            .run();
+        }
+      }
+      for (const [id, entry] of inserted) {
+        db.insert(schema.oraclePointerIndex)
+          .values({ id, tenantId, kind: entry.kind, key: entry.key, docIds: JSON.stringify(entry.ids), updatedAt: now })
+          .onConflictDoUpdate({
+            target: schema.oraclePointerIndex.id,
+            set: { docIds: JSON.stringify(entry.ids), updatedAt: now },
+          })
+          .run();
+      }
+    }
+  } catch (error) {
+    if (!missingPointerTable(error)) throw error;
+  }
+}
+
 export function removeDocumentPointers(dbInput: OracleDbInput, tenantId: string | undefined, documentIds: string[]): void {
   if (documentIds.length === 0) return;
   try {
     const db = toDb(dbInput);
     const tenant = tenantId?.trim() || 'default';
-    const rows = db.select({
-      id: schema.oraclePointerIndex.id,
-      kind: schema.oraclePointerIndex.kind,
-      key: schema.oraclePointerIndex.key,
-      docIds: schema.oraclePointerIndex.docIds,
-    }).from(schema.oraclePointerIndex)
-      .where(eq(schema.oraclePointerIndex.tenantId, tenant))
-      .all() as PointerRow[];
+    // LOCAL PATCH 2026-08-19 (deploy/alpha, not upstream): pre-filter candidate
+    // rows in SQL instead of loading and JSON-parsing the whole table per call.
+    // replaceDocumentPointers calls this once per document during reindex, so a
+    // full-table load was O(docs x pointer-rows): measured 107ms/doc at 2.9k
+    // docs / 7.3k pointer rows (~319s per run) — the dominant cost that pushed
+    // reindex past its 600s timeout (cron exit 124, 5 consecutive runs).
+    // instr() is a safe pre-filter: a row can only need updating when its
+    // docIds JSON text contains the documentId verbatim, so there are no false
+    // negatives; false positives (substring of another id) are still filtered
+    // by the exact JS match below.
+    const matches = or(...documentIds.map((documentId) => sql`instr(${schema.oraclePointerIndex.docIds}, ${documentId})`));
+    const rows = (matches
+      ? db.select({
+        id: schema.oraclePointerIndex.id,
+        kind: schema.oraclePointerIndex.kind,
+        key: schema.oraclePointerIndex.key,
+        docIds: schema.oraclePointerIndex.docIds,
+      }).from(schema.oraclePointerIndex)
+        .where(and(eq(schema.oraclePointerIndex.tenantId, tenant), matches))
+        .all()
+      : []) as PointerRow[];
     const remove = new Set(documentIds);
     const now = Date.now();
     for (const row of rows) {
