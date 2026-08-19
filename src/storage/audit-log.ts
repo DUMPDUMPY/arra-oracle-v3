@@ -78,6 +78,14 @@ export function createAuditLogObserver(
     if (!isWriteQuery(query) || isAuditLogQuery(query)) return;
 
     const requestId = currentDbRequestId();
+    // LOCAL PATCH 2026-08-19 (deploy/alpha, not upstream): skip writes that have
+    // no request context (indexer CLI / daemon / background jobs). The full
+    // reindex rewrites ~3k chunks 4x/day, which produced ~9k audit rows per run
+    // and grew audit_log to 1.08M rows / ~290MB in 6 weeks (DB 425MB), pushing
+    // reindex runtime past its 600s timeout (cron exit 124, 5 consecutive runs).
+    // Auditing only request-scoped writes matches the upstream feature intent:
+    // "Audit DB writes with request context" (#1562).
+    if (!requestId) return;
     db.insert(auditLog).values({
       who: options.actor?.() ?? defaultActor(requestId),
       what: normalizeAuditQuery(query),
