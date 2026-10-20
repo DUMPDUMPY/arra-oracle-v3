@@ -10,6 +10,7 @@ import path from 'path';
 import { eq, sql, or } from 'drizzle-orm';
 import { db, sqlite, oracleDocuments, indexingStatus, isDbLockError } from '../db/index.ts';
 import { normalizeRank } from '../search/fts-rank.ts';
+import { ftsQueryTerms } from '../search/fts-text.ts';
 import { REPO_ROOT, VECTOR_URL } from '../config.ts';
 
 const currentRepoRoot = () => process.env.ORACLE_REPO_ROOT || REPO_ROOT;
@@ -45,16 +46,9 @@ const FTS_TOKEN_LIMIT = 8;
  * made multi-word recall queries overly strict.
  */
 export function buildFtsQuery(query: string): string {
-  const tokens = query
-    .replace(/<[^>]*>/g, ' ')
-    .normalize('NFKC')
-    .match(/[\p{L}\p{N}]+/gu) // no `_`: matches the index tokenizer, see helpers.ts (#2953)
-    ?.map((token) => token.trim())
-    .filter((token) => token.length > 0)
-    .slice(0, FTS_TOKEN_LIMIT) ?? [];
-
+  const tokens = ftsQueryTerms(query);
   const uniqueTokens = Array.from(new Set(tokens));
-  return uniqueTokens.map((token) => `"${token.replace(/"/g, '""')}"`).join(' OR ');
+  return uniqueTokens.slice(0, FTS_TOKEN_LIMIT).join(' OR ');
 }
 
 function runFtsGet<T>(stmt: { get: (...args: any[]) => T }, args: unknown[]): T | null {

@@ -283,11 +283,9 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
     }
   } else {
     try {
-      // Embed into the primary collection. The registry decides which model is
-      // active, so a new learning lands in the same vector space the search
-      // path queries — naming a model here would split the index across spaces.
-      // Awaited: the store is returned before its fire-and-forget connect()
-      // resolves, so addDocuments could throw on a null db and silently degrade (#2931).
+      // Embed into the primary collection: the registry decides which model is
+      // active, so a learning lands in the vector space the search path queries.
+      // Awaited: the store is returned before its connect() resolves (#2931).
       const models = getEmbeddingModels();
       const model = resolveModelKey(undefined, models);
       const vectorStore = await ensureVectorStoreConnected(model, models);

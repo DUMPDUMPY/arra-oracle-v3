@@ -13,6 +13,7 @@ import { tenantIdForWrite } from '../middleware/tenant.ts';
 import { replaceEntityLinks } from '../search/entity-ranking.ts';
 import { chunkDocumentsForIndexing } from './chunker.ts';
 import { replaceDocumentPointersBatch, type PointerInput } from '../search/pointer-index.ts';
+import { ftsValues } from '../search/fts-write.ts';
 import type { VectorStoreAdapter } from '../vector/types.ts';
 import type { OracleDocument } from '../types.ts';
 
@@ -93,11 +94,9 @@ export async function storeDocuments(
       for (const rowid of ftsRowids.get(doc.id) ?? []) {
         tx.run(sql`DELETE FROM oracle_fts WHERE rowid = ${rowid}`);
       }
-      const inserted = tx.insert(oracleFts).values({
-        id: doc.id,
-        content: indexedContent,
-        concepts: doc.concepts.join(' '),
-      }).run();
+      const inserted = tx.insert(oracleFts).values(ftsValues(
+        tx, doc.id, doc.content, doc.concepts.join(' '), indexedContent,
+      )).run();
       // Drizzle types run() as void; its Bun adapter returns Statement.run()'s Changes.
       ftsRowids.set(doc.id, [(inserted as unknown as Changes).lastInsertRowid]);
       replaceEntityLinks(sqlite, {
