@@ -42,6 +42,8 @@ export interface EmbeddingModelConfig {
   collection: string; model: string; adapter?: VectorDBType; dataPath?: string; embedder?: EmbedderConfig;
   provider?: string; endpoint?: string; pythonVersion?: string; qdrantUrl?: string; qdrantApiKey?: string;
   cfAccountId?: string; cfApiToken?: string;
+  /** The collection that answers searches when no model is named. */
+  primary?: boolean;
 }
 function createConfiguredEmbedder(config: VectorStoreConfig) {
   const selection = resolveEmbeddingProviderSelection(config.embeddingProvider ?? (config.embeddingModel ? 'ollama' : undefined));
@@ -156,9 +158,16 @@ export const EMBEDDING_MODELS = new Proxy({} as Record<string, EmbeddingModelCon
 const modelStoreCache = new Map<string, VectorStoreAdapter>();
 const connectPromises = new Map<string, Promise<void>>();
 function resolveModelKey(model: string | undefined, models: Record<string, EmbeddingModelConfig>): string {
-  const key = model && models[model] ? model : (models['bge-m3'] ? 'bge-m3' : Object.keys(models)[0]);
-  if (!key) throw new Error('No embedding models configured');
-  return key;
+  if (model && models[model]) return model;
+  // The collection flagged primary in vector-server.json answers searches when
+  // no model is named. Without that flag, fall back to bge-m3 and then to the
+  // first registered model, which is the historical behaviour.
+  const primary = Object.entries(models).find(([, entry]) => entry.primary);
+  if (primary) return primary[0];
+  if (models['bge-m3']) return 'bge-m3';
+  const first = Object.keys(models)[0];
+  if (!first) throw new Error('No embedding models configured');
+  return first;
 }
 export function createVectorStoreForModel(preset: EmbeddingModelConfig): VectorStoreAdapter {
   return createVectorStore(vectorStoreConfigFromPreset(preset));

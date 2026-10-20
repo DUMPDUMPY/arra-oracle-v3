@@ -80,4 +80,6 @@ export interface VectorModelRegistryEntry {
   pythonVersion?: string;
   qdrantUrl?: string;
   qdrantApiKey?: string;
+  /** The collection that answers searches when no model is named. */
+  primary?: boolean;
 }

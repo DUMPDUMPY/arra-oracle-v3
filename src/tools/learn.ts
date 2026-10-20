@@ -283,8 +283,10 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
     }
   } else {
     try {
-      const model = process.env.ORACLE_EMBEDDING_MODEL || 'bge-m3';
-      const vectorStore = getVectorStoreByModel(model);
+      // Embed into the primary collection. The registry decides which model is
+      // active, so a new learning lands in the same vector space the search
+      // path queries — naming a model here would split the index across spaces.
+      const vectorStore = getVectorStoreByModel();
       await vectorStore.addDocuments([{
         id,
         document: frontmatter,

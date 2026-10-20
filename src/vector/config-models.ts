@@ -40,6 +40,7 @@ export function configToModels(config: VectorServerConfig): Record<string, Vecto
       qdrantApiKey: col.qdrantApiKey,
       dataPath: col.dataPath || config.dataPath || undefined,
       embedder: embedderFor(config, col),
+      primary: col.primary,
     };
   }
   return out;
