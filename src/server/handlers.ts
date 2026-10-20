@@ -19,7 +19,7 @@ import { localVectorOperations } from './vector-operations.ts';
 import { detectProject } from './project-detect.ts';
 import { coerceConcepts } from '../tools/learn.ts';
 import { createVectorProxy } from './vector-proxy.ts';
-import { buildLearningMarkdown, dateSlug } from '../learn/markdown.ts';
+import { buildLearningMarkdown, dateSlug, learningSlug } from '../learn/markdown.ts';
 import { localNativeVectorDisabledReason, localVectorIndexMissingReason, logLocalVectorDisabled, noteLocalVectorEnabled } from '../vector/cpu-capabilities.ts';
 import { isVectorSectionEnabled } from '../vector/config.ts';
 import { candidatePoolSize } from '../search/retrieve-depth.ts';
@@ -47,7 +47,7 @@ export function buildFtsQuery(query: string): string {
   const tokens = query
     .replace(/<[^>]*>/g, ' ')
     .normalize('NFKC')
-    .match(/[\p{L}\p{N}_]+/gu)
+    .match(/[\p{L}\p{N}]+/gu) // no `_`: matches the index tokenizer, see helpers.ts (#2953)
     ?.map((token) => token.trim())
     .filter((token) => token.length > 0)
     .slice(0, FTS_TOKEN_LIMIT) ?? [];
@@ -775,13 +775,13 @@ export function handleLearn(
   const d = new Date();
   const dateStr = dateSlug(d);
 
-  const slug = pattern
-    .substring(0, 50)
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
+  // PR #2838 (issue #2819) replaced the inline slug copy in `src/tools/learn.ts` — the
+  // MCP path — with `learningSlug`, and touched no other file. This one, the HTTP
+  // POST /api/learn path, kept its own copy, so a Thai learning saved over HTTP still
+  // produced `<date>_.md` long after the same bug was fixed for the tool. The route has
+  // already run `normalizeLearningPattern` on the body, so going through `learningSlug`
+  // re-normalises an identical string rather than changing the input.
+  const slug = learningSlug(pattern);
 
   // On slug collision (same date + same first-50-char prefix), append -2, -3, …
   // until unique. Prevents 500s when two writes share a slug within one day

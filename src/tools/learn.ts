@@ -9,7 +9,7 @@ import path from 'path';
 import fs from 'fs';
 import { oracleDocuments } from '../db/schema.ts';
 import { detectProject } from '../server/project-detect.ts';
-import { getVectorStoreByModel, getEmbeddingModels } from '../vector/factory.ts';
+import { getEmbeddingModels, ensureVectorStoreConnected, resolveModelKey } from '../vector/factory.ts';
 import { REPO_ROOT } from '../config.ts';
 import { buildLearningMarkdown, dateSlug, learningSlug, uniqueTail } from '../learn/markdown.ts';
 
@@ -286,7 +286,11 @@ export async function handleLearn(ctx: ToolContext, input: OracleLearnInput): Pr
       // Embed into the primary collection. The registry decides which model is
       // active, so a new learning lands in the same vector space the search
       // path queries — naming a model here would split the index across spaces.
-      const vectorStore = getVectorStoreByModel();
+      // Awaited: the store is returned before its fire-and-forget connect()
+      // resolves, so addDocuments could throw on a null db and silently degrade (#2931).
+      const models = getEmbeddingModels();
+      const model = resolveModelKey(undefined, models);
+      const vectorStore = await ensureVectorStoreConnected(model, models);
       await vectorStore.addDocuments([{
         id,
         document: frontmatter,
