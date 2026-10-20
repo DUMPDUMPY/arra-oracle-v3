@@ -6,6 +6,38 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### 2026-10-20 — Upstream FTS and indexer work, ported and verified
+
+Three upstream pull requests were ported into this fork. Each one was measured
+against our own corpus before it landed, not taken on faith.
+
+- **Reindex speed: FTS rows deleted by rowid, pointer writes batched**
+  (upstream #3069) — a full reindex went from 14 minutes to 5m46s. The
+  equivalence proof: of 13,462 chunks indexed before and after, none changed,
+  none disappeared and 41 were added; the 183 pointer rows that changed are
+  strict supersets of the rows they replaced, with 1,337 new memberships and
+  none lost.
+- **The HTTP search path no longer scores the strongest keyword match lowest**
+  (upstream #3029) — the BM25 rank is normalised through one shared function
+  (`src/search/fts-rank.ts`), so a bm25 of -11.36 that used to surface as
+  0.0809 now surfaces as 0.9668. Upstream's band of [0.9, 0.95] was not
+  copied: the curve here runs 0..1, because a "strong keyword score" signal
+  needs the whole range to stay meaningful.
+- **Thai is segmented at index and query time** (upstream #3081) — the FTS5
+  tokenizer drops Thai combining marks on the index side but not on the query
+  side, so a Thai word was written without its marks and searched with them.
+  `Intl.Segmenter` now segments both sides, and the untouched text is kept in
+  `oracle_document_content` for snippets and LIKE comparisons. Thai chunk
+  coverage rose from 0.70-0.95 to 0.93-0.98 (กรอบ 170→227 of 244, รอบ
+  175→233 of 240, ครับ 157→191 of 202); the English controls did not move.
+- **The file-size rule is met again** — four files that local patches had
+  pushed past 250 lines were split, with the public API kept intact:
+  `src/vector/factory.ts` (store construction to `store-factory.ts`, the
+  collection registry to `collection-registry.ts`), `src/mcp/server.ts`
+  (runtime state to `runtime-state.ts`), `src/routes/learn/crud.ts` (row
+  storage to `records.ts`) and `src/verify/handler.ts` (disk and DB scans to
+  `disk-scan.ts` and `db-scan.ts`).
+
 ### 2026-10-20 — EmbeddingGemma 2 as the primary collection
 
 The embedding collection is now chosen by the registry instead of a hardcoded

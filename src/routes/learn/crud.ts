@@ -1,26 +1,28 @@
 import { Elysia, t } from 'elysia';
 import { and, eq } from 'drizzle-orm';
-import { sqliteTable, text } from 'drizzle-orm/sqlite-core';
 import fs from 'fs';
 import path from 'path';
 import { db, learnLog, oracleDocuments, sqlite } from '../../db/index.ts';
 import { currentTenantId, tenantIdForWrite } from '../../middleware/tenant.ts';
 import { replaceEntityLinks } from '../../search/entity-ranking.ts';
 import { replaceDocumentPointers } from '../../search/pointer-index.ts';
-import { conceptsFrom, learningContent, slugFor } from './content.ts';
+import { conceptsFrom, learningContent } from './content.ts';
 import {
   INVALID_LEARNING_ID,
   INVALID_LEARNING_SOURCE_FILE,
-  learningSourcePath,
   safeLearningId,
   safeLearningSourceFile,
 } from './safety.ts';
-type LearnDoc = typeof oracleDocuments.$inferSelect;
-const oracleFts = sqliteTable('oracle_fts', {
-  id: text('id'),
-  content: text('content'),
-  concepts: text('concepts'),
-});
+import {
+  ftsContent,
+  nextIdentity,
+  oracleFts,
+  responseRow,
+  rowById,
+  upsertFts,
+  writeLearningFile,
+  type LearnDoc,
+} from './records.ts';
 export type LearnCreateBody = {
   pattern?: string;
   concepts?: string[] | string;
@@ -53,69 +55,6 @@ const UpdateBody = t.Object({
   supersededBy: t.Optional(t.Nullable(t.String())),
   supersededReason: t.Optional(t.Nullable(t.String())),
 });
-function writeLearningFile(sourceFile: string, content: string): boolean {
-  const filePath = learningSourcePath(sourceFile);
-  if (!filePath) throw new Error(INVALID_LEARNING_SOURCE_FILE);
-  if (fs.existsSync(filePath)) return false;
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  try {
-    fs.writeFileSync(filePath, content, { encoding: 'utf-8', flag: 'wx' });
-  } catch (error) {
-    if ((error as { code?: string }).code === 'EEXIST') return false;
-    throw error;
-  }
-  return true;
-}
-function ftsContent(id: string): string | null {
-  return db.select({ content: oracleFts.content })
-    .from(oracleFts)
-    .where(eq(oracleFts.id, id))
-    .get()?.content ?? null;
-}
-function upsertFts(id: string, content: string, concepts: string[]): void {
-  db.delete(oracleFts).where(eq(oracleFts.id, id)).run();
-  db.insert(oracleFts).values({ id, content, concepts: concepts.join(' ') }).run();
-}
-function nextIdentity(pattern: string, requestedId?: string, requestedSourceFile?: string) {
-  if (requestedId) {
-    return {
-      id: requestedId,
-      sourceFile: requestedSourceFile ?? `ψ/memory/learnings/${requestedId}.md`,
-    };
-  }
-  const date = new Date().toISOString().slice(0, 10);
-  const slug = slugFor(pattern);
-  let suffix = 1;
-  while (true) {
-    const tail = suffix === 1 ? slug : `${slug}-${suffix}`;
-    const id = `learning_${date}_${tail}`;
-    const sourceFile = requestedSourceFile ?? `ψ/memory/learnings/${date}_${tail}.md`;
-    const tenantId = currentTenantId();
-    const where = tenantId ? and(eq(oracleDocuments.id, id), eq(oracleDocuments.tenantId, tenantId)) : eq(oracleDocuments.id, id);
-    const existing = db.select({ id: oracleDocuments.id })
-      .from(oracleDocuments)
-      .where(where)
-      .get();
-    const filePath = learningSourcePath(sourceFile);
-    if (!existing && filePath && !fs.existsSync(filePath)) {
-      return {
-        id,
-        sourceFile,
-      };
-    }
-    suffix += 1;
-  }
-}
-function rowById(id: string): LearnDoc | undefined {
-  const tenantId = currentTenantId();
-  const base = and(eq(oracleDocuments.id, id), eq(oracleDocuments.type, 'learning'));
-  return db.select().from(oracleDocuments)
-    .where(tenantId ? and(base, eq(oracleDocuments.tenantId, tenantId)) : base)
-    .get();
-}
-function responseRow(row: LearnDoc) {
-  return { ...row, concepts: conceptsFrom(row.concepts) };
-}
 export function createLearning(body: LearnCreateBody) {
   const pattern = body.pattern?.trim();
   if (!pattern) return { status: 400, body: { error: 'Missing required field: pattern' } };

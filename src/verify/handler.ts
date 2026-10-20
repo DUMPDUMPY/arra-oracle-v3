@@ -7,14 +7,11 @@
  * Philosophy: "Nothing is Deleted" — orphans are flagged, not removed.
  */
 
-import path from 'path';
-import { existsSync } from 'node:fs';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db, oracleDocuments } from '../db/index.ts';
 import { currentTenantId } from '../middleware/tenant.ts';
-import { discoverCrewPsiDirs, discoverProjectPsiDirs } from '../indexer/discovery.ts';
-import { walkMarkdownFiles } from './files.ts';
-import { normalizeSourceFile } from './paths.ts';
+import { loadDbFileMap } from './db-scan.ts';
+import { scanDisk } from './disk-scan.ts';
 
 export interface VerifyResult {
   counts: {
@@ -41,24 +38,6 @@ export interface VerifyMismatch {
   mtimeMs?: number;
 }
 
-const PROJECT_PATH_RE = /^(?:github\.com|gitlab\.com|bitbucket\.org)\/[^/]+\/[^/]+$/;
-
-function canonicalSourceFile(sourceFile: string, project: string | null, repoRoot: string): string | null {
-  const normalized = normalizeSourceFile(sourceFile, repoRoot);
-  if (!normalized || !project || !PROJECT_PATH_RE.test(project) || !normalized.startsWith('ψ/')) {
-    return normalized;
-  }
-
-  // Older learn writers persisted flat ψ/ paths. Prefer their project-first
-  // successor when that canonical file exists on disk.
-  const projectFirst = `${project}/${normalized}`;
-  const repoBase = path.resolve(repoRoot);
-  const candidate = path.resolve(repoBase, projectFirst);
-  return candidate.startsWith(`${repoBase}${path.sep}`) && existsSync(candidate)
-    ? projectFirst
-    : normalized;
-}
-
 export function verifyKnowledgeBase(opts: {
   check?: boolean;
   type?: string;
@@ -67,102 +46,8 @@ export function verifyKnowledgeBase(opts: {
   const { check = true, type, repoRoot } = opts;
   const tenantId = currentTenantId();
 
-  const memorySubdirs = ['resonance', 'learnings', 'retrospectives'];
-  const diskFiles = new Map<string, number>(); // relativePath -> mtimeMs
-
-  const walkInto = (fullDir: string) => {
-    for (const f of walkMarkdownFiles(fullDir, repoRoot)) {
-      diskFiles.set(f.relativePath, f.mtimeMs);
-    }
-  };
-
-  const projectPsiDirs = discoverProjectPsiDirs(repoRoot);
-  const crewPsiDirs = discoverCrewPsiDirs(repoRoot);
-  const psiDirs = [...projectPsiDirs, ...crewPsiDirs];
-  for (const psiDir of psiDirs) {
-    for (const sub of memorySubdirs) {
-      walkInto(path.join(psiDir, 'memory', sub));
-    }
-    walkInto(path.join(psiDir, 'learn'));
-  }
-
-  for (const sub of memorySubdirs) {
-    walkInto(path.join(repoRoot, 'ψ', 'memory', sub));
-  }
-  walkInto(path.join(repoRoot, 'ψ', 'learn'));
-
-  // ψ/inbox is an indexed source, not merely an untracked side tree.
-  walkInto(path.join(repoRoot, 'ψ', 'inbox'));
-  for (const psiDir of projectPsiDirs) {
-    walkInto(path.join(psiDir, 'inbox'));
-  }
-
-  // 2. Query DB for all indexed documents
-  const normalizedType = type?.trim();
-  const typeFilter = normalizedType && normalizedType !== 'all' ? normalizedType : undefined;
-  const fields = {
-    id: oracleDocuments.id,
-    sourceFile: oracleDocuments.sourceFile,
-    indexedAt: oracleDocuments.indexedAt,
-    type: oracleDocuments.type,
-    project: oracleDocuments.project,
-  };
-  const activeDocWhere = and(
-    isNull(oracleDocuments.supersededBy),
-    isNull(oracleDocuments.supersededAt),
-  )!;
-  const dbRows = typeFilter && tenantId
-    ? db.select(fields)
-        .from(oracleDocuments)
-        .where(and(eq(oracleDocuments.type, typeFilter), eq(oracleDocuments.tenantId, tenantId), activeDocWhere))
-        .all()
-    : typeFilter
-    ? db.select({
-        ...fields,
-      })
-        .from(oracleDocuments)
-        .where(and(eq(oracleDocuments.type, typeFilter), activeDocWhere))
-        .all()
-    : tenantId
-      ? db.select(fields)
-        .from(oracleDocuments)
-        .where(and(eq(oracleDocuments.tenantId, tenantId), activeDocWhere))
-        .all()
-    : db.select(fields)
-        .from(oracleDocuments)
-        .where(activeDocWhere)
-        .all();
-
-  // Build map: sourceFile -> { indexedAt, ids[] }
-  // Multiple DB entries can point to the same source file (chunked docs)
-  const dbFileMap = new Map<string, { indexedAt: number; ids: string[] }>();
-  for (const row of dbRows) {
-    const sourceFile = canonicalSourceFile(row.sourceFile, row.project, repoRoot);
-    if (!sourceFile) continue;
-    const existing = dbFileMap.get(sourceFile);
-    if (existing) {
-      existing.ids.push(row.id);
-      // Use the latest indexedAt
-      if (row.indexedAt > existing.indexedAt) {
-        existing.indexedAt = row.indexedAt;
-      }
-    } else {
-      dbFileMap.set(sourceFile, { indexedAt: row.indexedAt, ids: [row.id] });
-    }
-  }
-
-  const untrackedRoots = [path.join(repoRoot, 'ψ', 'inbox')];
-  for (const psiDir of psiDirs) {
-    untrackedRoots.push(path.join(psiDir, 'inbox'));
-  }
-  const untrackedPathSet = new Set<string>();
-  if (!tenantId) {
-    for (const fullDir of untrackedRoots) {
-      for (const file of walkMarkdownFiles(fullDir, repoRoot)) {
-        untrackedPathSet.add(file.relativePath);
-      }
-    }
-  }
+  const { diskFiles, untrackedPathSet } = scanDisk(repoRoot, tenantId);
+  const dbFileMap = loadDbFileMap(repoRoot, type, tenantId);
 
   // 3. Classify
   const healthy: string[] = [];

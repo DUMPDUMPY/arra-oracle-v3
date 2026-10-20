@@ -8,14 +8,14 @@ import * as schema from '../db/schema.ts';
 import pkg from '../../package.json' with { type: 'json' };
 import { DB_PATH, ORACLE_DATA_DIR, REPO_ROOT } from '../config.ts';
 import { MCP_SERVER_NAME } from '../const.ts';
-import { getDisabledTools, getEnabledToolNames, loadToolGroupConfig, watchToolGroupConfig, type ToolGroupConfig } from '../config/tool-groups.ts';
+import { loadToolGroupConfig, watchToolGroupConfig, type ToolGroupConfig } from '../config/tool-groups.ts';
 import type { ToolContext, ToolResponse } from '../tools/types.ts';
 import type { VectorStoreAdapter } from '../vector/types.ts';
 import { defaultMcpToolOrder, mcpToolByName, mcpTools, toMcpToolDefinition, type RuntimeMcpToolManifest } from '../tools/mcp-manifest.ts';
 import type { UnifiedRuntime } from '../plugins/unified-loader.ts';
 import type { EmbeddedDeps, OracleMCPServerOptions } from './server-options.ts';
 import { probeVectorStore } from './vector-health.ts';
-import { formatEmbedderDegradedWarning, probeConfiguredEmbedder, readEmbedderRuntimeStatus, setEmbedderRuntimeStatus, type EmbedderRuntimeStatus } from '../vector/embedder-config.ts';
+import { probeConfiguredEmbedder, readEmbedderRuntimeStatus } from '../vector/embedder-config.ts';
 import { resolveInboundToolName, retiredAliasNotice } from './aliases.ts';
 import { proxyToolCall, resolveOracleApiBase } from './http-proxy.ts';
 import { ensureHttpDaemon } from './autostart-http.ts';
@@ -24,6 +24,7 @@ import { runWithTenant } from '../middleware/tenant.ts';
 import { stripMcpTenantArgs, tenantIdFromMcpArgs } from './tenant.ts';
 import { createMcpPluginRuntime, type McpPluginRuntime } from './plugin-runtime.ts';
 import { createFtsOnlyVectorStore } from './fts-only-vector-store.ts';
+import { McpRuntimeState } from './runtime-state.ts';
 export type { OracleMCPServerOptions } from './server-options.ts';
 function errorResponse(text: string): ToolResponse { return { content: [{ type: 'text', text }], isError: true }; }
 export class OracleMCPServer {
@@ -32,14 +33,9 @@ export class OracleMCPServer {
   private db: BunSQLiteDatabase<typeof schema> | null = null;
   private repoRoot = REPO_ROOT;
   private vectorStore: VectorStoreAdapter | null = null;
-  private vectorStatus: ToolContext['vectorStatus'] = 'unknown';
-  private vectorReason: string | undefined; private embedderProvider: string | undefined; private lastEmbedderWarning: string | undefined;
+  private state = new McpRuntimeState();
   private readOnly: boolean;
   private version = pkg.version;
-  private disabledTools = new Set<string>();
-  private enabledToolNames: string[] = [];
-  private explicitDisabledTools = new Set<string>();
-  private explicitEnabledTools = new Set<string>();
   private stopToolGroupsWatch: (() => void) | null = null;
   private embeddedReady: Promise<void> | null = null;
   private proxyReady: Promise<void> | null = null;
@@ -62,7 +58,7 @@ export class OracleMCPServer {
     this.applyToolGroupConfig(groupConfig);
     this.logToolGroupConfig(groupConfig);
     this.unifiedRuntime = createMcpPluginRuntime({ runtime: options.unifiedRuntime, runtimeRef: options.unifiedRuntimeRef, watch: options.watchPlugins, warn: (message) => console.error(message) });
-    this.watchToolGroupsIfNeeded(options.toolGroups);
+    this.stopToolGroupsWatch = this.state.watchToolGroupsIfNeeded(this.watchToolGroups, this.repoRoot, options.toolGroups);
     this.server = new Server(
       { name: MCP_SERVER_NAME, version: this.version },
       { capabilities: { tools: {} } },
@@ -71,28 +67,9 @@ export class OracleMCPServer {
     this.setupHandlers();
     this.setupErrorHandling(options.installSignalHandlers !== false);
   }
-  private applyToolGroupConfig(config: ToolGroupConfig): void {
-    this.disabledTools = getDisabledTools(config);
-    this.enabledToolNames = getEnabledToolNames(config);
-    this.explicitDisabledTools = new Set(config.disabled_tools ?? []);
-    this.explicitEnabledTools = new Set(config.enabled_tools ?? []);
-  }
+  private applyToolGroupConfig(config: ToolGroupConfig): void { this.state.applyToolGroupConfig(config); }
+  private logToolGroupConfig(config: ToolGroupConfig): void { this.state.logToolGroupConfig(config); }
 
-  private logToolGroupConfig(config: ToolGroupConfig): void {
-    const disabledGroups = Object.entries(config).filter(([, v]) => typeof v === 'boolean' && !v).map(([k]) => k);
-    if (disabledGroups.length) console.error(`[ToolGroups] Disabled groups: ${disabledGroups.join(', ')}`);
-    if (config.disabled_tools?.length) console.error(`[ToolGroups] disabled_tools: ${config.disabled_tools.join(', ')}`);
-    if (config.enabled_tools?.length) console.error(`[ToolGroups] enabled_tools (whitelist): ${config.enabled_tools.join(', ')}`);
-  }
-
-  private watchToolGroupsIfNeeded(pinnedConfig?: ToolGroupConfig): void {
-    if (pinnedConfig || process.env.ORACLE_TOOL_GROUPS_HOT_RELOAD === '0') return;
-    this.stopToolGroupsWatch = this.watchToolGroups((next) => {
-      this.applyToolGroupConfig(next);
-      this.logToolGroupConfig(next);
-      console.error('[ToolGroups] Reloaded');
-    }, this.repoRoot);
-  }
 
   private async getToolCtx(): Promise<ToolContext> {
     this.embeddedReady ??= this.initEmbedded();
@@ -103,7 +80,7 @@ export class OracleMCPServer {
     // tests/mcp/stats-embedder-freshness.test.ts.
     this.applyEmbedderStatus(await readEmbedderRuntimeStatus());
     const { store, modelKey } = await this.resolveActiveStore();
-    return { db: this.db, sqlite: this.sqlite, repoRoot: this.repoRoot, vectorStore: store, vectorStatus: this.vectorStatus, vectorReason: this.vectorReason, embedderProvider: this.embedderProvider, version: this.version, vectorModelKey: modelKey };
+    return { db: this.db, sqlite: this.sqlite, repoRoot: this.repoRoot, vectorStore: store, vectorStatus: this.state.vectorStatus, vectorReason: this.state.vectorReason, embedderProvider: this.state.embedderProvider, version: this.version, vectorModelKey: modelKey };
   }
 
   /**
@@ -115,7 +92,7 @@ export class OracleMCPServer {
    */
   private async resolveActiveStore(): Promise<{ store: VectorStoreAdapter; modelKey?: string }> {
     if (!this.vectorStore) throw new Error('Embedded Oracle resources failed to initialize');
-    if (this.vectorStatus === 'degraded') return { store: this.vectorStore };
+    if (this.state.vectorStatus === 'degraded') return { store: this.vectorStore };
     const { getEmbeddingModels, ensureVectorStoreConnected, resolveModelKey } = await this.loadEmbeddedDeps();
     if (!ensureVectorStoreConnected || !resolveModelKey) return { store: this.vectorStore };
     const models = getEmbeddingModels();
@@ -157,19 +134,12 @@ export class OracleMCPServer {
     return { createVectorStoreForModel, getEmbeddingModels, getVectorStoreByModel, ensureVectorStoreConnected, resolveModelKey, createDatabase, probeEmbedder: probeConfiguredEmbedder };
   }
 
-  private applyEmbedderStatus(status: EmbedderRuntimeStatus): void {
-    setEmbedderRuntimeStatus(status);
-    this.embedderProvider = status.provider;
-    if (status.status === 'connected') { this.vectorStatus = 'connected'; this.vectorReason = undefined; this.lastEmbedderWarning = undefined; return; }
-    if (status.status !== 'degraded') return;
-    this.vectorStatus = 'degraded';
-    this.vectorReason = status.reason;
-    const warning = formatEmbedderDegradedWarning(status.provider, status.reason ?? 'unknown');
-    if (this.lastEmbedderWarning !== warning) { console.error(warning); this.lastEmbedderWarning = warning; }
+  private applyEmbedderStatus(status: Parameters<McpRuntimeState['applyEmbedderStatus']>[0]): void {
+    this.state.applyEmbedderStatus(status);
   }
 
   private async verifyVectorHealth(): Promise<void> {
-    this.vectorStatus = await probeVectorStore(this.vectorStore, this.vectorStatus);
+    this.state.vectorStatus = await probeVectorStore(this.vectorStore, this.state.vectorStatus);
   }
 
   private setupErrorHandling(installSignalHandlers: boolean): void {
@@ -185,8 +155,8 @@ export class OracleMCPServer {
   }
 
   private isDisabled(tool: RuntimeMcpToolManifest): boolean {
-    if (this.explicitEnabledTools.has(tool.name)) return false;
-    return this.disabledTools.has(tool.name) || this.explicitDisabledTools.has(tool.name);
+    if (this.state.explicitEnabledTools.has(tool.name)) return false;
+    return this.state.disabledTools.has(tool.name) || this.state.explicitDisabledTools.has(tool.name);
   }
 
   private isAllowed(tool: RuntimeMcpToolManifest): boolean {
@@ -195,9 +165,9 @@ export class OracleMCPServer {
 
   private async availableTools() {
     const registry = await this.toolRegistry();
-    const configured = defaultMcpToolOrder(this.enabledToolNames);
+    const configured = defaultMcpToolOrder(this.state.enabledToolNames);
     const dynamic = [...registry.values()]
-      .filter((tool) => !configured.includes(tool.name) && (tool.enabledByDefault !== false || this.explicitEnabledTools.has(tool.name)))
+      .filter((tool) => !configured.includes(tool.name) && (tool.enabledByDefault !== false || this.state.explicitEnabledTools.has(tool.name)))
       .map((tool) => tool.name);
     return [...configured, ...dynamic]
       .map((name) => registry.get(name))
@@ -256,7 +226,7 @@ export class OracleMCPServer {
     await this.getToolCtx();
     try { await this.vectorStore?.connect(); }
     catch (error) {
-      if (this.vectorStatus !== 'degraded') throw error;
+      if (this.state.vectorStatus !== 'degraded') throw error;
       console.error(`[VectorDB:${this.vectorStore?.name ?? 'unknown'}] skipped pre-connect after embedder degradation`);
     }
   }
