@@ -4,16 +4,24 @@
  * SQLite owns delivery state. A logical vector job is unique by
  * (model_key, doc_id, content_hash, operation), so repeated scanners and
  * concurrent producers cannot enqueue the same canonical payload twice.
+ *
+ * Enqueue and completion live here; the claim path lives in job-claim.ts and
+ * the shared record shapes in job-store.ts.
  */
 
-import type Database from 'bun:sqlite';
 import { and, asc, count, eq, inArray, lt, or, sql } from 'drizzle-orm';
-import { drizzle, type BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
-import * as schema from '../db/schema.ts';
 import { indexingJobs, vectorIndexManifest } from '../db/schema.ts';
 import { vectorManifestId } from './vector-index-manifest.ts';
+import {
+  asDrizzle,
+  type EnqueuedJob,
+  type IndexedVectorJob,
+  type JobsDb,
+  type VectorOperation,
+} from './job-store.ts';
 
-export type VectorOperation = 'upsert' | 'delete';
+export { claimJobById, claimNextJob, claimNextJobs } from './job-claim.ts';
+export type { EnqueuedJob, IndexedVectorJob, VectorOperation } from './job-store.ts';
 
 export interface EnqueueOptions {
   docId: string;
@@ -28,34 +36,12 @@ export interface EnqueueOptions {
   force?: boolean;
 }
 
-export interface EnqueuedJob {
-  id: string;
-  docId: string;
-  modelKey: string;
-  collection: string;
-  contentHash: string;
-  operation: VectorOperation;
-}
-
-export interface IndexedVectorJob extends EnqueuedJob {
-  sourceFile: string;
-}
-
 const RANDOM_SUFFIX_LENGTH = 6;
-const DEFAULT_LEASE_MS = 2 * 60 * 1000;
-type JobsDb = Database | BunSQLiteDatabase<typeof schema>;
 
 function jobId(modelKey: string): string {
   const safe = modelKey.replace(/[^a-z0-9]/gi, '');
   const rand = Math.random().toString(36).slice(2, 2 + RANDOM_SUFFIX_LENGTH);
   return `idx-${Date.now()}-${safe}-${rand}`;
-}
-
-function asDrizzle(conn: JobsDb): BunSQLiteDatabase<typeof schema> {
-  if ('select' in conn && typeof conn.select === 'function') {
-    return conn as BunSQLiteDatabase<typeof schema>;
-  }
-  return drizzle(conn as Database, { schema });
 }
 
 /**
@@ -118,55 +104,6 @@ export function enqueueIndexJob(conn: JobsDb, opts: EnqueueOptions): EnqueuedJob
     if (inserted) out.push({ ...inserted, operation: inserted.operation as VectorOperation });
   }
   return out;
-}
-
-/** Atomically claim one pending job and issue a finite crash-recovery lease. */
-export function claimNextJob(
-  conn: JobsDb,
-  modelKey: string,
-  opts: { now?: number; leaseMs?: number } = {},
-): EnqueuedJob | null {
-  const db = asDrizzle(conn);
-  const now = opts.now ?? Date.now();
-  const leaseExpiresAt = now + (opts.leaseMs ?? DEFAULT_LEASE_MS);
-  const nextPending = db.select({ id: indexingJobs.id })
-    .from(indexingJobs)
-    .where(and(eq(indexingJobs.status, 'pending'), eq(indexingJobs.modelKey, modelKey)))
-    .orderBy(asc(indexingJobs.createdAt))
-    .limit(1);
-
-  const row = db.update(indexingJobs)
-    .set({
-      status: 'claimed',
-      claimedAt: now,
-      leaseExpiresAt,
-      attempts: sql`${indexingJobs.attempts} + 1`,
-    })
-    .where(inArray(indexingJobs.id, nextPending))
-    .returning({
-      id: indexingJobs.id,
-      docId: indexingJobs.docId,
-      modelKey: indexingJobs.modelKey,
-      collection: indexingJobs.collection,
-      contentHash: indexingJobs.contentHash,
-      operation: indexingJobs.operation,
-    })
-    .get();
-
-  return row ? { ...row, operation: row.operation as VectorOperation } : null;
-}
-
-/** Claim a small FIFO batch. Each claim is atomic, so competing daemons cannot
- * receive the same job; batching only changes work scheduling, not delivery semantics. */
-export function claimNextJobs(conn: JobsDb, modelKey: string, batchSize: number): EnqueuedJob[] {
-  const jobs: EnqueuedJob[] = [];
-  const size = Math.max(1, Math.trunc(batchSize));
-  for (let i = 0; i < size; i++) {
-    const job = claimNextJob(conn, modelKey);
-    if (!job) break;
-    jobs.push(job);
-  }
-  return jobs;
 }
 
 export function markJobDone(conn: JobsDb, id: string): void {
