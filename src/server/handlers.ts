@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import { eq, sql, or } from 'drizzle-orm';
 import { db, sqlite, oracleDocuments, indexingStatus, isDbLockError } from '../db/index.ts';
+import { normalizeRank } from '../search/fts-rank.ts';
 import { REPO_ROOT, VECTOR_URL } from '../config.ts';
 
 const currentRepoRoot = () => process.env.ORACLE_REPO_ROOT || REPO_ROOT;
@@ -286,14 +287,6 @@ export async function handleSearch(
   };
 }
 
-/**
- * Normalize FTS5 rank score to 0-1 range (higher = better)
- */
-function normalizeRank(rank: number): number {
-  // FTS5 rank is negative (more negative = better match)
-  // Convert to positive 0-1 score
-  return Math.min(1, Math.max(0, 1 / (1 + Math.abs(rank))));
-}
 
 /**
  * Combine FTS and vector results with rank-fusion hybrid scoring.

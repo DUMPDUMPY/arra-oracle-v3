@@ -1,4 +1,5 @@
 import { augmentQueryWithAcronyms } from '../../search/acronyms.ts';
+import { normalizeRank } from '../../search/fts-rank.ts';
 import type { CombinedSearchResult, FtsResult, PointerResult, SearchConfidence, SearchProvenance, VectorResult } from './types.ts';
 
 const FTS_TOKEN_LIMIT = 32;
@@ -42,9 +43,7 @@ export function sanitizeFtsQuery(query: string): string {
  * ordering is correct throughout, but separating two strong FTS hits would want
  * normalisation across the returned set rather than a fixed curve.
  */
-export function normalizeFtsScore(rank: number): number {
-  return 1 - Math.exp(-0.3 * Math.abs(rank));
-}
+export const normalizeFtsScore = normalizeRank;
 
 export function parseConceptsFromMetadata(concepts: unknown): string[] {
   if (!concepts) return [];

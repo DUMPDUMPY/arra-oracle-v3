@@ -5,12 +5,10 @@ import { isoTimestamp } from '../../search/timestamp.ts';
 import { logDocumentAccess } from '../../server/logging.ts';
 import type { SearchResponse } from '../../server/types.ts';
 import { buildTenantFtsQuery, parseConcepts } from '../../search/query.ts';
+import { normalizeRank } from '../../search/fts-rank.ts';
 
 type SearchRouteResponse = SearchResponse & { mode: string; warning?: string; vectorAvailable: boolean };
 type ListRow = Record<string, any>;
-function normalizeRank(rank: number): number {
-  return Math.min(1, Math.max(0, 1 / (1 + Math.abs(rank))));
-}
 
 function runFtsGet<T>(stmt: { get: (...args: any[]) => T }, args: unknown[]): T | null {
   try { return stmt.get(...args); } catch { return null; }
