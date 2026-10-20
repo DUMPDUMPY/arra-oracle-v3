@@ -6,6 +6,7 @@ import {
   ensureVectorStoreConnected,
   getEmbeddingModels,
   getVectorStoreConfigByModel,
+  resolveModelKey,
 } from '../vector/factory.ts';
 import { localNativeVectorDisabledReason, localVectorIndexMissingReason } from '../vector/cpu-capabilities.ts';
 import { selectVectorSearchModelKeys } from '../vector/model-selection.ts';
@@ -20,8 +21,10 @@ function modelKeys(model?: string): Array<string | undefined> {
 }
 
 async function searchOneModel(input: VectorSearchInput, model: string | undefined): Promise<SearchResult[]> {
-  const modelName = model || 'bge-m3';
-  const client = await ensureVectorStoreConnected(model);
+  const models = getEmbeddingModels();
+  // Report the collection that actually answered, not a historical default.
+  const modelName = resolveModelKey(model, models);
+  const client = await ensureVectorStoreConnected(model, models);
   const limit = input.limit ?? 10;
   const isMulti = input.model === 'multi';
   const whereFilter = input.type && input.type !== 'all' ? { type: input.type } : undefined;
@@ -108,12 +111,13 @@ export const localVectorOperations: VectorOperations = {
       }
     }));
 
-    const primary = engines.find(e => e.key === 'bge-m3') || engines[0];
+    const primaryKey = resolveModelKey(undefined, models);
+    const primary = engines.find(e => e.key === primaryKey) || engines[0];
     return {
       vector: {
         enabled: primary?.enabled ?? false,
         count: primary?.count ?? 0,
-        collection: primary?.collection ?? 'oracle_knowledge_bge_m3',
+        collection: primary?.collection ?? 'oracle_knowledge',
       },
       vectors: engines,
     };

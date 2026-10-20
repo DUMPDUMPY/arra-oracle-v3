@@ -1,4 +1,5 @@
 import { answerOracleAsk, type AskInput } from '../routes/ask/index.ts';
+import { vectorModelKeys } from './search/definition.ts';
 import type { ToolResponse } from './types.ts';
 
 export const askToolDef = {
@@ -13,7 +14,7 @@ export const askToolDef = {
       limit: { type: 'number', description: 'Maximum evidence sources to use (1-20)', default: 8 },
       project: { type: 'string', description: 'Filter by project; includes project plus universal results.' },
       cwd: { type: 'string', description: 'Auto-detect project from a working directory path.' },
-      model: { type: 'string', enum: ['nomic', 'qwen3', 'bge-m3'], description: 'Embedding model for retrieval.' },
+      model: { type: 'string', enum: vectorModelKeys(), description: 'Embedding collection for retrieval. Omit to use the primary collection.' },
       asOf: { type: 'string', description: 'Valid-time timestamp for historical answers, e.g. 2026-06-17T00:00:00Z.' },
       llm: { type: 'boolean', description: 'Set false for deterministic extractive answers without an LLM call.', default: true },
     },

@@ -47,7 +47,7 @@ export interface OracleSearchInput {
   retrieval?: 'full' | 'compact-summary';
   project?: string;
   cwd?: string;
-  model?: 'nomic' | 'qwen3' | 'bge-m3';
+  model?: string;
   asOf?: string;
 }
 

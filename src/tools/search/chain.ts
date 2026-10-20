@@ -1,4 +1,5 @@
 import type { VectorQueryResult } from '../../vector/types.ts';
+import { getEmbeddingModels, resolveModelKey } from '../../vector/factory.ts';
 import { linkTraces } from '../../trace/links.ts';
 import { createTrace } from '../../trace/store.ts';
 import { cosineDistanceToSimilarity } from '../../vector/scoring.ts';
@@ -71,6 +72,8 @@ function foundFilesFor(results: VectorResult[], hop: number): FoundFile[] {
 
 function mapQueryById(result: VectorQueryResult, model: string | undefined): VectorResult[] {
   const mapped: VectorResult[] = [];
+  // Name the collection that answered instead of a historical default.
+  const modelName = resolveModelKey(model, getEmbeddingModels());
   for (let i = 0; i < result.ids.length; i++) {
     const metadata = result.metadatas[i] as Record<string, unknown> | null;
     const distance = result.distances[i] ?? 0;
@@ -82,7 +85,7 @@ function mapQueryById(result: VectorQueryResult, model: string | undefined): Vec
       concepts: parseConceptsFromMetadata(metadata?.concepts),
       score: cosineDistanceToSimilarity(distance),
       distance,
-      model: model || 'bge-m3',
+      model: modelName,
       source: 'vector',
     });
   }

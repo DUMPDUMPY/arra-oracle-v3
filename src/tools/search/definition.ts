@@ -1,3 +1,14 @@
+import { getEmbeddingModels } from '../../vector/factory.ts';
+
+/**
+ * The searchable collections come from the registry, so the schema lists the
+ * collections that exist right now instead of a frozen list of model names.
+ */
+export function vectorModelKeys(): string[] {
+  const keys = Object.keys(getEmbeddingModels());
+  return keys.length > 0 ? keys : ['bge-m3'];
+}
+
 export const searchToolDef = {
   name: 'oracle_search',
   description: 'Search Oracle knowledge base using hybrid search (FTS5 keywords + LanceDB vectors). Finds relevant principles, patterns, learnings, or retrospectives. Falls back to FTS5-only if the vector index is unavailable.',
@@ -46,8 +57,8 @@ export const searchToolDef = {
       },
       model: {
         type: 'string',
-        enum: ['nomic', 'qwen3', 'bge-m3'],
-        description: 'Embedding model: bge-m3 (default, multilingual Thai↔EN, 1024-dim), nomic (fast, 768-dim), or qwen3 (cross-language, 4096-dim)',
+        enum: vectorModelKeys(),
+        description: 'Embedding collection to search. Omit to search the primary collection from vector-server.json.',
       },
       asOf: {
         type: 'string',
