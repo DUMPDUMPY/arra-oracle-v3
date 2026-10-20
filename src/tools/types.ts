@@ -16,6 +16,8 @@ export interface ToolContext {
   sqlite: Database;
   repoRoot: string;
   vectorStore: VectorStoreAdapter;
+  /** Registry key of the collection that vectorStore points at. */
+  vectorModelKey?: string;
   vectorStatus: 'unknown' | 'connected' | 'unavailable' | 'degraded';
   vectorReason?: string;
   embedderProvider?: string;

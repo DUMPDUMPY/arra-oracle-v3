@@ -25,8 +25,10 @@ export async function vectorSearch(
 ): Promise<VectorResult[]> {
   try {
     const whereFilter = type !== 'all' ? { type } : undefined;
+    // The context carries the store for the collection that is active right
+    // now; naming a model explicitly overrides it.
     const store = model ? await ensureVectorStoreConnected(model) : ctx.vectorStore;
-    console.error(`[VectorSearch] Query: "${query.substring(0, 50)}..." limit=${limit} model=${model || 'default'}`);
+    console.error(`[VectorSearch] Query: "${query.substring(0, 50)}..." limit=${limit} model=${model || ctx.vectorModelKey || 'default'}`);
 
     const results = await store.query(query, limit, whereFilter);
     console.error(`[VectorSearch] Results: ${results.ids?.length || 0} documents`);
@@ -34,7 +36,7 @@ export async function vectorSearch(
 
     const tenantId = currentTenantId();
     const allowedIds = tenantId ? tenantAllowedIds(ctx, results.ids, tenantId) : null;
-    const resolvedModelName = model || 'bge-m3';
+    const resolvedModelName = model || ctx.vectorModelKey || 'unknown';
     const mappedResults: VectorResult[] = [];
 
     for (let i = 0; i < results.ids.length; i++) {

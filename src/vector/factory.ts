@@ -157,7 +157,7 @@ export const EMBEDDING_MODELS = new Proxy({} as Record<string, EmbeddingModelCon
 });
 const modelStoreCache = new Map<string, VectorStoreAdapter>();
 const connectPromises = new Map<string, Promise<void>>();
-function resolveModelKey(model: string | undefined, models: Record<string, EmbeddingModelConfig>): string {
+export function resolveModelKey(model: string | undefined, models: Record<string, EmbeddingModelConfig>): string {
   if (model && models[model]) return model;
   // The collection flagged primary in vector-server.json answers searches when
   // no model is named. Without that flag, fall back to bge-m3 and then to the

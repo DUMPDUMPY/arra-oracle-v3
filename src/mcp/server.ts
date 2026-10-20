@@ -95,19 +95,42 @@ export class OracleMCPServer {
   private async getToolCtx(): Promise<ToolContext> {
     this.embeddedReady ??= this.initEmbedded();
     await this.embeddedReady;
-    if (!this.sqlite || !this.db || !this.vectorStore) throw new Error('Embedded Oracle resources failed to initialize');
+    if (!this.sqlite || !this.db) throw new Error('Embedded Oracle resources failed to initialize');
     // Re-probes behind a TTL, as /api/v1/stats and /api/v1/health already do. The snapshot
     // reader never re-probes, so this reported boot-time truth forever — see #2817 and
     // tests/mcp/stats-embedder-freshness.test.ts.
     this.applyEmbedderStatus(await readEmbedderRuntimeStatus());
-    return { db: this.db, sqlite: this.sqlite, repoRoot: this.repoRoot, vectorStore: this.vectorStore, vectorStatus: this.vectorStatus, vectorReason: this.vectorReason, embedderProvider: this.embedderProvider, version: this.version };
+    const { store, modelKey } = await this.resolveActiveStore();
+    return { db: this.db, sqlite: this.sqlite, repoRoot: this.repoRoot, vectorStore: store, vectorStatus: this.vectorStatus, vectorReason: this.vectorReason, embedderProvider: this.embedderProvider, version: this.version, vectorModelKey: modelKey };
+  }
+
+  /**
+   * Resolve the collection that answers searches, per tool call.
+   *
+   * The registry (vector-server.json) decides which collection is active, and
+   * it can change while this process keeps running — a store captured at boot
+   * would keep querying the retired collection forever.
+   */
+  private async resolveActiveStore(): Promise<{ store: VectorStoreAdapter; modelKey?: string }> {
+    if (!this.vectorStore) throw new Error('Embedded Oracle resources failed to initialize');
+    if (this.vectorStatus === 'degraded') return { store: this.vectorStore };
+    const { getEmbeddingModels, ensureVectorStoreConnected, resolveModelKey } = await this.loadEmbeddedDeps();
+    if (!ensureVectorStoreConnected || !resolveModelKey) return { store: this.vectorStore };
+    const models = getEmbeddingModels();
+    if (Object.keys(models).length === 0) return { store: this.vectorStore };
+    const key = resolveModelKey(undefined, models);
+    const store = await ensureVectorStoreConnected(key, models);
+    return { store, modelKey: key };
   }
 
   private async initEmbedded(): Promise<void> {
     if (this.sqlite && this.db && this.vectorStore) return;
-    const { createVectorStoreForModel, getEmbeddingModels, createDatabase, probeEmbedder = probeConfiguredEmbedder } = await this.loadEmbeddedDeps();
+    const { createVectorStoreForModel, getEmbeddingModels, createDatabase, probeEmbedder = probeConfiguredEmbedder, resolveModelKey } = await this.loadEmbeddedDeps();
     const models = getEmbeddingModels();
-    const preset = models['bge-m3'] ?? Object.values(models)[0];
+    // The primary collection answers searches; bge-m3 is only a historical
+    // default, not the answer when the registry names another collection.
+    const key = resolveModelKey && Object.keys(models).length > 0 ? resolveModelKey(undefined, models) : undefined;
+    const preset = key ? models[key] : (models['bge-m3'] ?? Object.values(models)[0]);
     const embedderStatus = await probeEmbedder(preset);
     this.applyEmbedderStatus(embedderStatus);
     try { this.vectorStore = createVectorStoreForModel(preset); } catch (error) {
@@ -122,11 +145,14 @@ export class OracleMCPServer {
 
   private async loadEmbeddedDeps(): Promise<EmbeddedDeps> {
     if (this.embeddedDeps) return await this.embeddedDeps;
-    const [{ createVectorStoreForModel, getEmbeddingModels }, { createDatabase }] = await Promise.all([
+    const [
+      { createVectorStoreForModel, getEmbeddingModels, getVectorStoreByModel, ensureVectorStoreConnected, resolveModelKey },
+      { createDatabase },
+    ] = await Promise.all([
       import('../vector/factory.ts'),
       import('../db/create.ts'),
     ]);
-    return { createVectorStoreForModel, getEmbeddingModels, createDatabase, probeEmbedder: probeConfiguredEmbedder };
+    return { createVectorStoreForModel, getEmbeddingModels, getVectorStoreByModel, ensureVectorStoreConnected, resolveModelKey, createDatabase, probeEmbedder: probeConfiguredEmbedder };
   }
 
   private applyEmbedderStatus(status: EmbedderRuntimeStatus): void {

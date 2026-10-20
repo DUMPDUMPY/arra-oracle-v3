@@ -97,7 +97,8 @@ function resolvePreset(
 ): EmbeddingModelConfig | undefined {
   if (model && models[model]) return models[model];
   if (model) return Object.values(models).find((preset) => preset.collection === model);
-  return models['bge-m3'] ?? Object.values(models)[0];
+  const primary = Object.values(models).find((preset) => preset.primary);
+  return primary ?? models['bge-m3'] ?? Object.values(models)[0];
 }
 
 function hitsFromQuery(result: VectorQueryResult): EntityLinkHit[] {
