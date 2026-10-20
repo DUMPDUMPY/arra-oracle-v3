@@ -36,6 +36,9 @@ export class OllamaEmbeddings implements EmbeddingProvider {
       'qwen3-embedding:4b': 2560,
       'qwen3-embedding:8b': 4096,
       'bge-m3': 1024,
+      'embeddinggemma': 768,
+      'embeddinggemma-2': 768,
+      'embeddinggemma-2:270m': 768,
       'mxbai-embed-large': 1024,
       'all-minilm': 384,
       'qllama/multilingual-e5-large-instruct': 1024,
@@ -65,14 +68,21 @@ export class OllamaEmbeddings implements EmbeddingProvider {
     const isQwen3 = this.model.includes('qwen3-embedding');
     const isE5 = this.model.includes('multilingual-e5') || this.model.includes('/e5-');
     const isBge = this.model.includes('bge');
+    // EmbeddingGemma ships its own retrieval instruction vocabulary. The model
+    // name does not contain "bge", so it needs its own branch.
+    const isEmbeddingGemma = this.model.includes('embeddinggemma');
     if (type === 'query') {
       if (isQwen3) {
         truncated = `Instruct: Given a search query, retrieve relevant passages that answer the query\nQuery: ${truncated}`;
+      } else if (isEmbeddingGemma) {
+        truncated = `task: search result | query: ${truncated}`;
       } else if (isBge || isE5) {
         truncated = `query: ${truncated}`;
       }
     } else if (type === 'passage') {
-      if (isBge || isE5) {
+      if (isEmbeddingGemma) {
+        truncated = `title: none | text: ${truncated}`;
+      } else if (isBge || isE5) {
         truncated = `passage: ${truncated}`;
       }
     }
