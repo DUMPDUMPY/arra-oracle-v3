@@ -6,6 +6,36 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) an
 
 ## [Unreleased]
 
+### 2026-10-20 — EmbeddingGemma 2 as the primary collection
+
+The embedding collection is now chosen by the registry instead of a hardcoded
+model name. `vector-server.json` marks one collection `primary`, and every
+search, embed and index path follows that flag.
+
+- **Registry-driven primary** — `resolveModelKey` honours `primary` and falls
+  back to `bge-m3` only when no collection claims it. The search model is
+  carried through the registry, so `learn` writes into the same vector space
+  the search path queries.
+- **EmbeddingGemma instruction prefixes** — the model is task-steered, so a
+  query is embedded as `task: search result | query: {text}` and a document as
+  `title: none | text: {text}`. Measured on our own corpus, dropping the
+  prefixes costs 8.3 points of r@5 on English and 8.3 on Thai.
+- **The MCP store is resolved per tool call** — the server used to bind its
+  vector store at boot, so a long-lived MCP process kept querying the retired
+  collection after the registry promoted another one. The store now comes from
+  the registry on every call, and `ToolContext.vectorModelKey` names it.
+- **The reported model follows the store that answered** — the HTTP search
+  route, chain search, vector stats and the tool schemas named `bge-m3` while
+  querying another collection.
+- **The indexer queue claim is exclusive** — claim and update were separate
+  statements, so two workers could take the same job and the write failed
+  with a SQLite snapshot-upgrade error. The claim is now a guarded
+  select-then-update.
+- **Upstream `alpha` merged** — the session corpus over HTTP, the MCP
+  HTTP-daemon autostart, the `psi/outbox` collector, the smart-delete scoping
+  fix and the indexer error-count fix. The learn path now awaits the vector
+  store connection as well as writing into the primary collection.
+
 ### 2026-06-15 session wave — unified surfaces, coverage, and UI
 
 34 PRs merged into `alpha` on 2026-06-15 (13:16-15:52 UTC). Each PR is
